@@ -40,8 +40,7 @@ class SafeZHoming:
                 toolhead.set_position(pos, homing_axes=[2])
                 toolhead.manual_move([None, None, self.z_hop],
                                      self.z_hop_speed)
-                if hasattr(toolhead.get_kinematics(), "note_z_not_homed"):
-                    toolhead.get_kinematics().note_z_not_homed()
+                toolhead.get_kinematics().clear_homing_state((2,))
             elif pos[2] < self.z_hop:
                 # If the Z axis is homed, and below z_hop, lift it to z_hop
                 toolhead.manual_move([None, None, self.z_hop],
@@ -79,7 +78,10 @@ class SafeZHoming:
             self.prev_G28(g28_gcmd)
             # Perform Z Hop again for pressure-based probes
             if self.z_hop:
-                toolhead.manual_move([None, None, self.z_hop], self.z_hop_speed)
+                pos = toolhead.get_position()
+                if pos[2] < self.z_hop:
+                    toolhead.manual_move([None, None, self.z_hop],
+                                         self.z_hop_speed)
             # Move XY back to previous positions
             if self.move_to_previous:
                 toolhead.manual_move(prevpos[:2], self.speed)

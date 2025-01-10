@@ -13,13 +13,13 @@ class DeltaKinematics:
     def __init__(self, toolhead, config):
         # Setup tower rails
         stepper_configs = [config.getsection('stepper_' + a) for a in 'abc']
-        rail_a = stepper.PrinterRail(
+        rail_a = stepper.LookupMultiRail(
             stepper_configs[0], need_position_minmax = False)
         a_endstop = rail_a.get_homing_info().position_endstop
-        rail_b = stepper.PrinterRail(
+        rail_b = stepper.LookupMultiRail(
             stepper_configs[1], need_position_minmax = False,
             default_position_endstop=a_endstop)
-        rail_c = stepper.PrinterRail(
+        rail_c = stepper.LookupMultiRail(
             stepper_configs[2], need_position_minmax = False,
             default_position_endstop=a_endstop)
         self.rails = [rail_a, rail_b, rail_c]
@@ -30,6 +30,8 @@ class DeltaKinematics:
         self.max_z_velocity = config.getfloat(
             'max_z_velocity', self.max_velocity,
             above=0., maxval=self.max_velocity)
+        self.max_z_accel = config.getfloat('max_z_accel', self.max_accel,
+                                          above=0., maxval=self.max_accel)
         # Read radius and arm lengths
         self.radius = radius = config.getfloat('delta_radius', above=0.)
         print_radius = config.getfloat('print_radius', radius, above=0.)
@@ -63,6 +65,8 @@ class DeltaKinematics:
         self.min_z = config.getfloat('minimum_z_position', 0, maxval=self.max_z)
         self.limit_z = min([ep - arm
                             for ep, arm in zip(self.abs_endstops, arm_lengths)])
+        self.min_arm_length = min_arm_length = min(arm_lengths)
+        self.min_arm2 = min_arm_length**2
         logging.info(
             "Delta max build height %.2fmm (radius tapered above %.2fmm)"
             % (self.max_z, self.limit_z))
@@ -101,6 +105,11 @@ class DeltaKinematics:
         self.limit_xy2 = -1.
         if tuple(homing_axes) == (0, 1, 2):
             self.need_home = False
+    def clear_homing_state(self, axes):
+        # Clearing homing state for each axis individually is not implemented
+        if 0 in axes or 1 in axes or 2 in axes:
+            self.limit_xy2 = -1
+            self.need_home = True
     def home(self, homing_state):
         # All axes are homed simultaneously
         homing_state.set_axes([0, 1, 2])
@@ -108,8 +117,7 @@ class DeltaKinematics:
         forcepos[2] = -1.5 * math.sqrt(max(self.arm2)-self.max_xy2)
         homing_state.home_rails(self.rails, forcepos, self.home_position)
     def _motor_off(self, print_time):
-        self.limit_xy2 = -1.
-        self.need_home = True
+        self.clear_homing_state((0, 1, 2))
     def check_move(self, move):
         end_pos = move.end_pos
         end_xy2 = end_pos[0]**2 + end_pos[1]**2
@@ -121,7 +129,11 @@ class DeltaKinematics:
         end_z = end_pos[2]
         limit_xy2 = self.max_xy2
         if end_z > self.limit_z:
-            limit_xy2 = min(limit_xy2, (self.max_z - end_z)**2)
+            above_z_limit = end_z - self.limit_z
+            allowed_radius = self.radius - math.sqrt(
+                self.min_arm2 - (self.min_arm_length - above_z_limit)**2
+            )
+            limit_xy2 = min(limit_xy2, allowed_radius**2)
         if end_xy2 > limit_xy2 or end_z > self.max_z or end_z < self.min_z:
             # Move out of range - verify not a homing move
             if (end_pos[:2] != self.home_position[:2]
@@ -130,7 +142,8 @@ class DeltaKinematics:
             limit_xy2 = -1.
         if move.axes_d[2]:
             z_ratio = move.move_d / abs(move.axes_d[2])
-            move.limit_speed(self.max_z_velocity * z_ratio, move.accel)
+            move.limit_speed(self.max_z_velocity * z_ratio,
+                             self.max_z_accel * z_ratio)
             limit_xy2 = -1.
         # Limit the speed/accel of this move if is is at the extreme
         # end of the build envelope
@@ -147,6 +160,7 @@ class DeltaKinematics:
             'homed_axes': '' if self.need_home else 'xyz',
             'axis_minimum': self.axes_min,
             'axis_maximum': self.axes_max,
+            'cone_start_z': self.limit_z,
         }
     def get_calibration(self):
         endstops = [rail.get_homing_info().position_endstop
